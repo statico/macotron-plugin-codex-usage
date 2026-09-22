@@ -157,8 +157,10 @@ for (const style of Object.keys(t.STYLES)) {
     assert(out.template === false, style + " is not a template in multi color");
     assert(out.svg.includes(style === "percent" || style === "compact" ? 'r="2"' : "<line"), style + " shows the pace marker");
     // percent draws "Wk 65%" as one text node, so look for the label anywhere.
-    if (labels) assert(out.svg.includes("Wk"), style + " labels the window by its length");
-    if (!labels) assert(!out.svg.includes("Wk"), style + " drops the label when names are off");
+    // The ring has room for one letter only.
+    const want = style === "ring" ? "W" : "Wk";
+    if (labels) assert(out.svg.includes(want), style + " labels the window by its length");
+    if (!labels) assert(!out.svg.includes("W"), style + " drops the label when names are off");
   }
 }
 t.setData({ windows: three, tokens: 0, at: now });
