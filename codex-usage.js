@@ -280,8 +280,9 @@ const STYLES = {
       const a = (-90 + 360 * v.mark) * (Math.PI / 180);
       out += tick(cx + (r - 2) * Math.cos(a), cy + (r - 2) * Math.sin(a), cx + (r + 2) * Math.cos(a), cy + (r + 2) * Math.sin(a), pace);
     }
-    // Two characters at 8pt is all that fits inside a 15pt ring.
-    if (opts.labels) out += text(cx, cy + 3, 8, 700, fg, 1, label, "middle");
+    // One letter at 9pt is what sits well inside a 15pt ring, so the ring
+    // takes the first character of the label: W, D, or the hour count.
+    if (opts.labels) out += text(cx, cy + 3.3, 9, 700, fg, 1, label[0], "middle");
     return { w: size + 1, h: size, body: out };
   },
 
