@@ -5,26 +5,30 @@
 // its rate-limit windows in every session rollout under ~/.codex/sessions, so
 // the numbers come off disk. No key, no network, no third-party binary.
 //
-// Codex reports two windows and names neither: `primary` is the short rolling
-// one (five hours at the time of writing) and `secondary` the weekly one. The
-// labels and the pace math read `window_minutes` rather than assume either.
+// Codex reports its windows as `primary`, `secondary`, … and names none of
+// them: the only description of a window is its `window_minutes`. How many
+// there are depends on the plan and on the day — an account with no short
+// window reports one, and the five-hour window went away for some plans in
+// July 2026 — so this plugin draws the windows it is given and names each one
+// after its own length. It never assumes a session window exists.
 
 const opts = macotron.plugin({
   title: "Codex Usage",
   description: "Codex CLI rate-limit graphs in the menu bar, with pace markers.",
   help:
     "Reads the session logs the Codex CLI writes under ~/.codex/sessions. No key and no network: " +
-    "nothing leaves the Mac. The numbers only move when Codex runs, so the dashboard says how old " +
-    "they are. Click the item for the dashboard.",
+    "nothing leaves the Mac. Codex decides which limit windows it reports, and the plugin shows " +
+    "each one it finds. The numbers only move when Codex runs, so the dashboard says how old they " +
+    "are. Click the item for the dashboard.",
   options: {
     show: {
       type: "dropdown",
       label: "Show",
-      default: "both",
+      default: "all",
       choices: [
-        { value: "both", label: "Session and week" },
-        { value: "session", label: "Session only" },
-        { value: "week", label: "Week only" },
+        { value: "all", label: "Every window Codex reports" },
+        { value: "short", label: "Shortest window only" },
+        { value: "long", label: "Longest window only" },
       ],
     },
     style: {
@@ -48,7 +52,7 @@ const opts = macotron.plugin({
         { value: "mono", label: "Monochrome" },
       ],
     },
-    labels: { type: "boolean", label: "Show names", default: true, help: "Session and Week labels on the icons." },
+    labels: { type: "boolean", label: "Show names", default: true, help: "The window's length on the icon: 5h, Wk." },
     pace: {
       type: "boolean",
       label: "Pace marker",
@@ -61,13 +65,17 @@ const opts = macotron.plugin({
 
 const ROOT = "~/.codex/sessions";
 // A rollout with no rate limits in it is a session that never called the API.
-// Seven days back is what it takes to still show a number after a week off.
+// Forty files back is enough to still show a number after a week off.
 const FILES = 40;
 const MINUTE = 60e3;
+// The bar has room for two windows. An account reporting more (Codex has
+// shipped three at times) gets the shortest and the longest in the icon; the
+// dashboard always lists every one of them.
+const ICON_MAX = 2;
 // CoreSVG ignores text-anchor and PostScript face names, but honors a numeric
 // font-weight. Centered text is placed by hand from Helvetica Bold advances.
 const FONT = "Helvetica";
-const ADVANCE = { S: 0.667, W: 0.944, e: 0.556, s: 0.556, i: 0.278, o: 0.611, n: 0.611, k: 0.556, "%": 0.889, " ": 0.278 };
+const ADVANCE = { W: 0.944, k: 0.5, h: 0.556, d: 0.556, m: 0.833, "%": 0.889, " ": 0.278, "—": 1 };
 function textWidth(s, size) {
   let w = 0;
   for (const c of s) w += ADVANCE[c] || 0.556;
@@ -85,7 +93,7 @@ const SYS = {
 };
 const PACE_COLOR = ["green", "teal", "yellow", "orange", "red", "purple"];
 
-let data = null; // { session, week, tokens, at }
+let data = null; // { windows: [{ key, pct, minutes, duration, resets }], tokens, at }
 let error = null;
 
 // ---------------------------------------------------------------- math
@@ -127,9 +135,31 @@ function resetsIn(resets, now) {
   return resets <= now ? "Reset now" : duration(resets - now);
 }
 
-// "5-hour", "Weekly". Codex names neither window, it only gives the minutes.
-function windowName(minutes) {
-  if (!minutes) return "";
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// QuickJS has no Intl, so the clock is assembled by hand. The host knows
+// whether this Mac shows a 12-hour clock.
+let H12 = true;
+try {
+  H12 = macotron.system.locale().hour12 !== false;
+} catch (e) {
+  /* keep the default */
+}
+
+// "Sun 3:41 PM", or "Sep 28, 3:41 PM" once it is more than a week out and the
+// weekday stops being enough to place it.
+function clockAt(ms, now) {
+  const d = new Date(ms);
+  const h24 = d.getHours();
+  const h = H12 ? h24 % 12 || 12 : h24;
+  const time = h + ":" + String(d.getMinutes()).padStart(2, "0") + (H12 ? (h24 < 12 ? " AM" : " PM") : "");
+  if (ms - now >= 6 * 24 * 3600e3) return MONTHS[d.getMonth()] + " " + d.getDate() + ", " + time;
+  return DAYS[d.getDay()] + " " + time;
+}
+
+// "5-hour", "Weekly". Codex names no window, it only gives the minutes.
+function windowName(minutes, key) {
+  if (!minutes) return key ? key[0].toUpperCase() + key.slice(1) : "Limit";
   if (minutes % 10080 === 0) {
     const w = minutes / 10080;
     return w === 1 ? "Weekly" : w + "-week";
@@ -139,6 +169,15 @@ function windowName(minutes) {
     return d === 1 ? "Daily" : d + "-day";
   }
   return minutes >= 60 ? Math.round(minutes / 60) + "-hour" : minutes + "-minute";
+}
+
+// The icon has room for two characters: "5h", "Wk", "3d".
+function windowShort(minutes) {
+  if (!minutes) return "—";
+  if (minutes % 10080 === 0) return minutes === 10080 ? "Wk" : minutes / 10080 + "w";
+  if (minutes >= 1440) return Math.round(minutes / 1440) + "d";
+  if (minutes >= 60) return Math.round(minutes / 60) + "h";
+  return minutes + "m";
 }
 
 // One quota as the renderer wants it. A window whose reset has passed has
@@ -155,7 +194,19 @@ function view(q, now) {
     tier: opts.pace ? paceTier(pct, frac) : null,
     resets: q && q.resets && !expired ? q.resets : null,
     minutes: q ? q.minutes : 0,
+    key: q ? q.key : "",
   };
+}
+
+// The windows to draw in the bar, shortest first. Older installs have "both",
+// "session" or "week" saved in the dropdown.
+function pick(windows) {
+  if (!windows.length) return [];
+  const want = (opts.show || "all").toLowerCase();
+  if (want === "short" || want === "session") return [windows[0]];
+  if (want === "long" || want === "week") return [windows[windows.length - 1]];
+  if (windows.length <= ICON_MAX) return windows;
+  return [windows[0], windows[windows.length - 1]];
 }
 
 // ---------------------------------------------------------------- svg
@@ -176,9 +227,9 @@ function tick(x1, y1, x2, y2, stroke) {
   return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="2" stroke-linecap="round"/>`;
 }
 
-// Each style returns { w, h, body } for one quota. `v` is a view(), `label`
-// is "Session"/"Week", `fg` the bar's text color, `fill` the status color,
-// `pace` the pace tick color (fg when pace tiers are off or unavailable).
+// Each style returns { w, h, body } for one window. `v` is a view(), `label`
+// the window's short name ("5h", "Wk"), `fg` the bar's text color, `fill` the
+// status color, `pace` the pace tick color (fg when pace tiers are off).
 const STYLES = {
   // The status bar resamples anything taller than 18pt, so the tracker's
   // 42x28 layout is squeezed vertically: an 8pt bar over a 7.5pt label.
@@ -196,9 +247,9 @@ const STYLES = {
   },
 
   bar(v, label, fg, fill, pace) {
-    const x0 = opts.labels ? 13 : 1;
+    const x0 = opts.labels ? Math.ceil(textWidth(label, 10)) + 4 : 1;
     let out = "";
-    if (opts.labels) out += text(1, 13, 10, 600, fg, 0.9, label[0]);
+    if (opts.labels) out += text(1, 13, 10, 600, fg, 0.9, label);
     out += `<rect x="${x0}" y="4.5" width="40" height="9" rx="4" fill="${fg}" fill-opacity="0.2"/>`;
     const fw = 40 * Math.min(v.shown / 100, 1);
     if (fw > 1) {
@@ -229,13 +280,14 @@ const STYLES = {
       const a = (-90 + 360 * v.mark) * (Math.PI / 180);
       out += tick(cx + (r - 2) * Math.cos(a), cy + (r - 2) * Math.sin(a), cx + (r + 2) * Math.cos(a), cy + (r + 2) * Math.sin(a), pace);
     }
-    if (opts.labels) out += text(cx, cy + 3.3, 9, 700, fg, 1, label[0], "middle");
+    // Two characters at 8pt is all that fits inside a 15pt ring.
+    if (opts.labels) out += text(cx, cy + 3, 8, 700, fg, 1, label, "middle");
     return { w: size + 1, h: size, body: out };
   },
 
   percent(v, label, fg, fill, pace) {
-    const s = (opts.labels ? label[0] + ": " : "") + Math.floor(v.shown) + "%";
-    const tw = Math.ceil(s.length * 7.2) + 4;
+    const s = (opts.labels ? label + " " : "") + Math.floor(v.shown) + "%";
+    const tw = Math.ceil(textWidth(s, 12)) + 4;
     let out = text(2, 13, 12, 600, fill, 1, s);
     let w = tw + 2;
     if (v.tier !== null) {
@@ -249,8 +301,8 @@ const STYLES = {
     let x = 1;
     let out = "";
     if (opts.labels) {
-      out += text(1, 12.5, 9, 500, fg, 0.85, label[0] + ":");
-      x = 18;
+      out += text(1, 12.5, 9, 500, fg, 0.85, label);
+      x = Math.ceil(textWidth(label, 9)) + 4;
     }
     out += `<circle cx="${x + 4}" cy="9" r="4" fill="${fill}"/>`;
     x += 8;
@@ -266,10 +318,9 @@ function render(dark) {
   const fg = dark ? "#FFFFFF" : "#000000";
   const mono = opts.color === "mono";
   const now = Date.now();
-  const parts = [];
-  const want = (opts.show || "both").toLowerCase();
-  if (want !== "week") parts.push(["Session", view(data && data.session, now)]);
-  if (want !== "session") parts.push(["Week", view(data && data.week, now)]);
+  const windows = pick(data ? data.windows : []);
+  // Nothing read yet: one empty slot, so the item still has a shape.
+  const parts = windows.length ? windows.map((q) => [windowShort(q.minutes), view(q, now)]) : [["—", view(null, now)]];
   const draw = STYLES[opts.style] || STYLES.battery;
   const pieces = parts.map(([label, v]) => {
     const fill = mono ? fg : color(v.color, dark);
@@ -300,27 +351,28 @@ function esc(s) {
 
 const DASH_GREEN = ["#1B6B34", "#3CC75F"];
 
-function card(title, tag, subtitle, v, dark, now) {
+function card(title, v, dark, now) {
   const fill = v.color === "green" ? DASH_GREEN[dark ? 1 : 0] : color(v.color, dark);
   const pace = v.tier !== null ? color(PACE_COLOR[v.tier], dark) : "canvastext";
   const width = Math.min(v.shown / 100, 1) * 100;
+  // Both halves of the answer to "when does this come back": the countdown
+  // and the wall clock it lands on.
+  const reset = v.resets ? "Resets in " + resetsIn(v.resets, now) + " · " + clockAt(v.resets, now) : "";
   return (
-    `<div class="row"><div class="head"><div class="t">${esc(title)}` +
-    (tag ? `<span class="tag">${esc(tag)}</span>` : "") +
-    (subtitle ? `<div class="sub">${esc(subtitle)}</div>` : "") +
-    `</div><div class="pct" style="color:${fill}">${Math.floor(v.shown)}%</div></div>` +
+    `<div class="row"><div class="head"><div class="t">${esc(title)}</div>` +
+    `<div class="pct" style="color:${fill}">${Math.floor(v.shown)}%</div></div>` +
     `<div class="bar"><div class="fill" style="width:${width}%;background:${fill}"></div>` +
     (v.mark !== null ? `<div class="mark" style="left:calc(${v.mark * 100}% - 0.75px);background:${pace}"></div>` : "") +
     `</div>` +
-    (v.resets ? `<div class="reset">Resets in ${resetsIn(v.resets, now)}</div>` : "") +
+    (reset ? `<div class="reset">${esc(reset)}</div>` : "") +
     `</div>`
   );
 }
 
-// Card height in points: frame and head, then a line each for subtitle and
-// reset. The web row clips, so this has to be right.
-function cardHeight(subtitle, v) {
-  return 48 + (subtitle ? 13 : 0) + (v.resets ? 15 : 0);
+// Card height in points: frame and head, then a line for the reset. The web
+// row clips, so this has to be right.
+function cardHeight(v) {
+  return 48 + (v.resets ? 15 : 0);
 }
 
 const CSS =
@@ -328,15 +380,14 @@ const CSS =
   "body{margin:0;padding:8px 14px;font:13px -apple-system,sans-serif;color:canvastext}" +
   ".row{border:0.5px solid color-mix(in srgb,canvastext 10%,transparent);border-radius:8px;padding:8px 10px;margin-bottom:6px}" +
   ".head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px}" +
-  ".t{font-weight:500}.tag{font-size:9px;font-weight:500;color:graytext;" +
-  "background:color-mix(in srgb,canvastext 8%,transparent);border-radius:99px;padding:1px 5px;margin-left:6px;vertical-align:1px}" +
-  ".sub{font-size:10px;color:graytext;margin-top:1px}" +
+  ".t{font-weight:500}" +
   ".pct{font-weight:600;font-variant-numeric:tabular-nums}" +
   ".bar{position:relative;height:4px;border-radius:2.5px;background:color-mix(in srgb,canvastext 8%,transparent)}" +
   ".fill{height:4px;border-radius:2.5px;transition:width .6s ease-in-out}" +
   ".mark{position:absolute;top:-2px;width:2.5px;height:8px;border-radius:1px}" +
   ".reset{font-size:9px;color:graytext;margin-top:4px}" +
   ".foot{font-size:10px;color:graytext;margin:2px 2px 0}" +
+  ".none{color:graytext;padding:2px}" +
   "</style>";
 
 function tokens(n) {
@@ -352,15 +403,16 @@ function dashboard(dark) {
   const now = Date.now();
   let html = CSS;
   let height = 16;
-  const add = (title, v) => {
-    const sub = v.minutes ? "rolling " + windowName(v.minutes).toLowerCase() + " window" : "";
-    html += card(title, "", sub, v, dark, now);
-    height += cardHeight(sub, v);
-  };
-  const s = view(data.session, now);
-  const w = view(data.week, now);
-  add(windowName(s.minutes) || "Session", s);
-  add(windowName(w.minutes) || "Week", w);
+  if (!data.windows.length) {
+    html += `<div class="none">Codex reported no limit windows.</div>`;
+    height += 20;
+  }
+  // Every window Codex reported, shortest first, each with its own reset.
+  for (const q of data.windows) {
+    const v = view(q, now);
+    html += card(windowName(v.minutes, v.key), v, dark, now);
+    height += cardHeight(v);
+  }
   // Codex only writes these numbers while it runs, so their age is part of
   // the reading: a plugin that hid it would show yesterday's usage as today's.
   const foot = [tokens(data.tokens), data.at ? "read " + duration(Math.max(0, now - data.at)) + " ago" : null]
@@ -382,6 +434,7 @@ function barIsDark() {
 function paint() {
   const dark = macotron.system.darkMode();
   const icon = render(barIsDark());
+  const now = Date.now();
   macotron.menubar.status("codex-usage", {
     title: "",
     svg: icon.svg,
@@ -397,14 +450,16 @@ function paint() {
       { title: "Settings…", onClick: () => macotron.settings.open() },
     ],
   });
-  const now = Date.now();
   macotron.checks([
     {
       title: "Codex sessions",
       ok: !error,
       message:
         error ||
-        (data ? "Session " + Math.floor(view(data.session, now).pct) + "% · Week " + Math.floor(view(data.week, now).pct) + "%" : "Waiting"),
+        (data
+          ? data.windows.map((q) => windowName(q.minutes, q.key) + " " + Math.floor(view(q, now).pct) + "%").join(" · ") ||
+            "No limit windows reported"
+          : "Waiting"),
     },
   ]);
 }
@@ -454,12 +509,26 @@ function num(v) {
 }
 
 // resets_in_seconds counts from when the event was written, not from now.
-function quota(w, at) {
-  if (!w) return null;
+function quota(w, key, at) {
+  if (!w || typeof w !== "object") return null;
+  // A window Codex knows nothing about is not a window. Without this an
+  // absent `secondary` would draw as a second bar reading 0%.
+  if (w.used_percent === undefined && w.window_minutes === undefined) return null;
   const minutes = num(w.window_minutes);
   const secs = w.resets_in_seconds !== undefined && w.resets_in_seconds !== null ? num(w.resets_in_seconds) : null;
   const resets = w.resets_at ? Date.parse(w.resets_at) || num(w.resets_at) * 1000 : secs !== null ? at + secs * 1000 : null;
-  return { pct: num(w.used_percent), minutes, duration: minutes * MINUTE, resets: resets || null };
+  return { key, pct: num(w.used_percent), minutes, duration: minutes * MINUTE, resets: resets || null };
+}
+
+// Whatever keys the event carries — primary, secondary, and any Codex adds —
+// shortest window first so the labels read left to right in the bar.
+function windowsOf(limits, at) {
+  const out = [];
+  for (const key in limits) {
+    const q = quota(limits[key], key, at);
+    if (q) out.push(q);
+  }
+  return out.sort((a, b) => a.minutes - b.minutes);
 }
 
 // The last line in the file that carries rate limits is the newest reading.
@@ -475,15 +544,12 @@ function scan(text) {
       continue;
     }
     const limits = find(e, "rate_limits", 4);
-    if (!limits || (!limits.primary && !limits.secondary)) continue;
+    if (!limits) continue;
     const at = Date.parse(e.timestamp || (e.payload && e.payload.timestamp) || "") || Date.now();
+    const windows = windowsOf(limits, at);
+    if (!windows.length) continue;
     const used = find(e, "total_token_usage", 4);
-    return {
-      session: quota(limits.primary, at),
-      week: quota(limits.secondary, at),
-      tokens: used ? num(used.total_tokens) : 0,
-      at,
-    };
+    return { windows, tokens: used ? num(used.total_tokens) : 0, at };
   }
   return null;
 }
