@@ -10,8 +10,9 @@ icon styles, same thresholds, same colors, same pace marker.
   passed, the color follows the projected usage instead of the raw number.
 - A pace tick sits at the elapsed fraction of the window. Its color says how
   far ahead of it you are: green, teal, yellow, orange, red, purple.
-- Click the item for a dashboard with both windows, their reset times, the
-  session token total, and how old the reading is.
+- Click the item for a dashboard listing every limit window Codex reports,
+  each with its percentage and when it resets — the countdown and the wall
+  clock it lands on — plus the session token total and how old the reading is.
 
 No key, no network, no third-party binary. The plugin reads files the Codex
 CLI already writes.
@@ -37,9 +38,17 @@ windows the server reported:
 ```
 
 The plugin walks the rollouts newest first and takes the last reading it
-finds. `primary` is the short rolling window and `secondary` the weekly one;
-Codex names neither, so the labels come from `window_minutes` — the plugin
-says "5-hour" because the file said 300, not because it assumes five hours.
+finds.
+
+Codex names none of its windows. `primary`, `secondary` and any others are
+just slots, and the only description of a window is its `window_minutes`, so
+every label here is derived: the plugin says "Weekly" because the file said
+10080, and "5-hour" because it said 300. How many windows come back depends on
+the plan and on the day — the five-hour window went away for some plans in
+July 2026, and those accounts report a weekly window alone. A slot Codex sends
+empty is not drawn at all, and the menu-bar icon shows at most two windows
+(the shortest and the longest) while the dashboard lists all of them.
+
 `resets_in_seconds` counts from the event, not from now, so the countdown is
 anchored to the timestamp on the line.
 
